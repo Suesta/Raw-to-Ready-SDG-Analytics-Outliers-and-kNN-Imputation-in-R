@@ -20,6 +20,7 @@ Puntos clave para reclutadores:
 ├── Suesta_fichero_clean.csv             # Dataset limpio final (entregable)
 ├── Suesta_preproceso.html               # Informe RMarkdown renderizado (entregable)
 ├── Suesta_preproceso.Rmd                # Código fuente del informe (entregable)
+├── Enunciado Actividad 1                # Enunciado de la actividad 
 └── WorldSustainabilityDataset.csv       # Dataset original crudo (fuente)
 ```
 
