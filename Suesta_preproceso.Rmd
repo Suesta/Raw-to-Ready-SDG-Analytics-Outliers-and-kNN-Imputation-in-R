@@ -1,0 +1,732 @@
+---
+title: "Actividad A1 – Preproceso de los datos"
+author: "Víctor Suesta Arribas"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Preparación del entorno
+
+Voy a dejar el entorno listo y comprobar que los datos cargan bien.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r librerias}
+# librerías que voy a usar en todo el trabajo
+library(tidyverse)
+library(readxl)
+library(VIM)
+library(kableExtra)
+library(ggplot2)
+```
+
+```{r lectura_y_verificacion}
+# intento 1
+datos <- read.csv2("WorldSustainabilityDataset.csv", stringsAsFactors = FALSE)
+
+diccionario <- readxl::read_excel("Data Dictionary.xlsx")
+
+# chequeos básicos
+dim(datos)
+names(datos)[1:10]
+head(datos)
+```
+
+En mi caso, el CSV parece venir en formato “inglés” (separador coma y punto decimal), porque con `read.csv2` me sale todo en una sola columna. Reintento con `read.csv()`.
+
+```{r relectura_csv_formato_ingles}
+# intento 2
+rm(datos)
+datos <- read.csv("WorldSustainabilityDataset.csv", stringsAsFactors = FALSE)
+
+
+dim(datos)
+names(datos)[1:10]
+head(datos)
+```
+
+# 1. Estructura de los datos
+
+## 1.1 Diccionario — tablas requeridas
+
+```{r columnas-diccionario}
+# miro qué columnas trae el diccionario para orientarme
+names(diccionario)
+```
+
+```{r tablas-diccionario}
+# monto las tablas que pide el enunciado a partir del Excel (convierto el ODS a numero para poder ordenar)
+ods_num <- readr::parse_number(diccionario[["Associated SDG GOAL"]])
+
+dicc_vars_ods <- diccionario |>
+  dplyr::mutate(ODS = as.numeric(ods_num)) |>
+  dplyr::transmute(
+    ODS,
+    Code,
+    Description
+  ) |>
+  dplyr::filter(!is.na(Code)) |>
+  dplyr::arrange(ODS, Code)
+
+dicc_ods_desc <- diccionario |>
+  dplyr::mutate(ODS = as.numeric(ods_num)) |>
+  dplyr::select(ODS, Description) |>
+  dplyr::distinct() |>
+  dplyr::arrange(ODS)
+
+# enseño una muestra
+knitr::kable(dplyr::slice_head(dicc_vars_ods, n = 15),
+             caption = "Tabla 1 — ODS, código del indicador y descripción") |>
+  kableExtra::kable_styling(full_width = FALSE)
+
+knitr::kable(dplyr::slice_head(dicc_ods_desc, n = 15),
+             caption = "Tabla 2 — ODS y su descripción") |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+## 1.2 Fichero de datos — renombrado de columnas
+
+```{r inspeccion-nombres-datos}
+# veo los nombres tal como vienen para ubicarme
+length(names(datos))
+head(names(datos), 30)
+```
+
+```{r renombrado-claves}
+# intento localizar de forma "semi-automática" las 5 columnas clave (normalizo un poco cadenas para comparar sin mayúsculas/extras)
+norm_txt <- function(x) {
+  x |>
+    stringr::str_replace_all("\\s+", " ") |>
+    stringr::str_trim() |>
+    tolower()
+}
+
+nombres_originales <- names(datos)
+nombres_norm <- norm_txt(nombres_originales)
+
+# posiciones candidatas (si justo coinciden con estas variantes)
+pos_country     <- which(nombres_norm %in% c("country", "country name", "name", "nation"))
+pos_ccode       <- which(nombres_norm %in% c("countrycode", "country code", "iso3", "iso code"))
+pos_regime      <- which(nombres_norm %in% c("regime", "classification types: regime", "regime type"))
+pos_income      <- which(nombres_norm %in% c("income", "income group", "economic classification", "economic general: income"))
+pos_region      <- which(nombres_norm %in% c("region", "world region", "un region", "classification types: region"))
+
+# preparo un vector con los nuevos nombres; si no los localizo, no cambio nada
+nuevo_nombre <- nombres_originales
+if (length(pos_country) == 1) nuevo_nombre[pos_country] <- "Country"
+if (length(pos_ccode)   == 1) nuevo_nombre[pos_ccode]   <- "CountryCode"
+if (length(pos_regime)  == 1) nuevo_nombre[pos_regime]  <- "Regime"
+if (length(pos_income)  == 1) nuevo_nombre[pos_income]  <- "Income"
+if (length(pos_region)  == 1) nuevo_nombre[pos_region]  <- "Region"
+
+names(datos) <- nuevo_nombre
+
+# compruebo si ya tengo las 5 columnas clave con su nombre estándar
+c(
+  Country     = "Country" %in% names(datos),
+  CountryCode = "CountryCode" %in% names(datos),
+  Regime      = "Regime" %in% names(datos),
+  Income      = "Income" %in% names(datos),
+  Region      = "Region" %in% names(datos)
+)
+```
+
+```{r buscar-candidatas}
+# por si lo anterior no detectó algo, busco por patrones en todos los nombres
+candidatas_region <- names(datos)[grepl("region",  names(datos), ignore.case = TRUE)]
+candidatas_income <- names(datos)[grepl("income",  names(datos), ignore.case = TRUE)]
+candidatas_regime <- names(datos)[grepl("regime",  names(datos), ignore.case = TRUE)]
+candidatas_country<- names(datos)[grepl("country", names(datos), ignore.case = TRUE)]
+
+list(
+  region  = candidatas_region,
+  income  = candidatas_income,
+  regime  = candidatas_regime,
+  country = candidatas_country
+)
+```
+
+```{r renombrado-explicito}
+# aquí ya renombro con los nombres reales de este fichero
+mapping <- c(
+  "Country.Name" = "Country",
+  "Country.Code" = "CountryCode",
+  "Regime.Type..RoW.Measure.Definition." = "Regime",
+  "Income.Classification..World.Bank.Definition." = "Income",
+  "Region"   = "Region",   
+  "Continent"= "Region"    # si no hay Region pero sí Continent, lo uso como Region
+)
+
+for (old in names(mapping)) {
+  new <- mapping[[old]]
+  if (old %in% names(datos)) {
+    # si ya existe Region auténtica, no la piso con Continent
+    if (old == "Continent" && "Region" %in% names(datos)) next
+    names(datos)[names(datos) == old] <- new
+  }
+}
+
+# chequeo final de las 5
+c(
+  Country     = "Country" %in% names(datos),
+  CountryCode = "CountryCode" %in% names(datos),
+  Regime      = "Regime" %in% names(datos),
+  Income      = "Income" %in% names(datos),
+  Region      = "Region" %in% names(datos)
+)
+```
+
+```{r chequeo-muestra-claves, results='asis'}
+# muestro unas pocas filas de las columnas clave para ver si están bien
+cols_clave <- c("Country","CountryCode","Regime","Income","Region")
+cols_clave <- cols_clave[cols_clave %in% names(datos)]
+
+if (length(cols_clave) > 0) {
+  knitr::kable(
+    head(dplyr::select(datos, dplyr::all_of(cols_clave)), 10),
+    caption = "Muestra de columnas clave"
+  ) |>
+    kableExtra::kable_styling(full_width = FALSE)
+} else {
+  cat("Sigo sin localizar las columnas clave. Tocaría ajustar el mapeo de nombres.\n")
+}
+```
+
+# 2. Tipos de datos e inconsistencias
+
+## 2.1 Cuantitativas — revisar y convertir donde toque
+
+```{r inspeccion-tipos}
+# miro clases para detectar columnas que son texto pero deberían ser numéricas
+sapply(datos, class)
+```
+
+```{r cuantitativas-limpiar}
+# identificadores que no convierto a numérico
+id_cols <- c("Country","CountryCode","Year","Regime","Income","Region")
+
+# paso strings vacíos / marcas a NA
+datos[datos == ""] <- NA
+datos[datos %in% c("NA","N/A","na","NaN")] <- NA
+
+# Year lo dejo como entero
+datos$Year <- as.integer(datos$Year)
+
+# selecciono solo columnas de texto que no son identificadores
+char_cols <- names(datos)[sapply(datos, is.character) & !(names(datos) %in% id_cols)]
+
+# función sencilla: limpia la coma decimal, quita espacios y convierte
+to_numeric <- function(x) {
+  x <- trimws(x)
+  x[x == ""] <- NA
+  x <- gsub(",", ".", x)
+  x <- gsub("\\s+", "", x)
+  suppressWarnings(as.numeric(x))
+}
+
+# convierto todas las candidatas
+if (length(char_cols) > 0) {
+  datos <- dplyr::mutate(datos, dplyr::across(dplyr::all_of(char_cols), to_numeric))
+}
+
+cat("Columnas numéricas tras limpieza:", sum(sapply(datos, is.numeric)), "\n")
+```
+
+```{r resumen-cuantitativas}
+# resumen cortito de algunas variables
+vars_muestra <- c("Year","SI.POV.GINI","SP.DYN.LE00.IN","NY.GDP.MKTP.CD")
+vars_muestra <- vars_muestra[vars_muestra %in% names(datos)]
+
+if (length(vars_muestra) > 0) {
+  summary(dplyr::select(datos, dplyr::all_of(vars_muestra)))
+} else {
+  cat("Las variables de ejemplo no están con esos nombres en este fichero.\n")
+}
+```
+
+## 2.2 Cualitativas — limpiar etiquetas y duplicados
+
+```{r cualitativas-limpiar}
+# estandarizo espacios y mayúsculas en categóricas clave
+datos <- datos |>
+  dplyr::mutate(
+    Country     = trimws(Country),
+    CountryCode = toupper(trimws(CountryCode)),
+    Regime      = trimws(Regime),
+    Income      = trimws(Income),
+    Region      = trimws(Region)
+  ) |>
+  dplyr::mutate(
+    Regime = ifelse(!is.na(Regime), tools::toTitleCase(tolower(Regime)), Regime),
+    Income = ifelse(!is.na(Income), tools::toTitleCase(tolower(Income)), Income),
+    Region = ifelse(!is.na(Region), tools::toTitleCase(tolower(Region)), Region)
+  )
+
+# miro unas cuantas categorías para ver que no haya rarezas
+cat("Regime (muestra):\n"); print(utils::head(sort(unique(datos$Regime)), 10))
+cat("\nIncome (muestra):\n"); print(utils::head(sort(unique(datos$Income)), 10))
+cat("\nRegion (muestra):\n"); print(utils::head(sort(unique(datos$Region)), 10))
+```
+
+```{r cualitativas-paises-codigos}
+# duplicados por (CountryCode, Year) o (Country, Year) no deberían existir
+c(
+  duplicados_por_codigo_y_anio = any(duplicated(datos[, c("CountryCode","Year")])),
+  duplicados_por_pais_y_anio   = any(duplicated(datos[, c("Country","Year")]))
+)
+```
+
+```{r muestra-identificadores, results='asis'}
+# muestro algunas filas de identificadores ya limpios
+knitr::kable(
+  head(dplyr::select(datos, Country, CountryCode, Year, Region, Income, Regime), 10),
+  caption = "Muestra de identificadores y cualitativas (Fase 2)"
+) |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+# 3. Valores extremos (outliers)
+
+```{r fase3-vars}
+# columnas numéricas que voy a usar en esta parte
+gini_var <- "Gini.index..World.Bank.estimate....SI.POV.GINI"
+co2_var  <- "Annual.production.based.emissions.of.carbon.dioxide..CO2..measured.in.million.tonnes...GH.EM.IC.LUF"
+
+c(
+  gini_existe = gini_var %in% names(datos),
+  co2_existe  = co2_var  %in% names(datos)
+)
+```
+
+```{r gini-densidad}
+# 3.1 GINI — densidad
+ggplot(datos, aes(x = .data[[gini_var]])) +
+  geom_density(na.rm = TRUE) +
+  labs(title = "GINI – densidad", x = "GINI", y = "Densidad")
+```
+
+```{r gini-boxplot-year}
+# boxplot de GINI por año para ver si hay años con más dispersión
+ggplot(datos, aes(x = factor(Year), y = .data[[gini_var]])) +
+  geom_boxplot(na.rm = TRUE, outlier.alpha = 0.5) +
+  labs(title = "GINI – boxplot por año", x = "Año", y = "GINI")
+```
+
+```{r gini-outliers}
+# outliers con la regla IQR
+gini_ok  <- datos[[gini_var]]
+gini_ok  <- gini_ok[!is.na(gini_ok)]
+bp_gini  <- boxplot.stats(gini_ok)
+out_gini <- bp_gini$out
+
+c(
+  n_total     = length(gini_ok),
+  n_outliers  = length(out_gini),
+  min_outlier = ifelse(length(out_gini) > 0, min(out_gini), NA),
+  max_outlier = ifelse(length(out_gini) > 0, max(out_gini), NA)
+)
+```
+
+```{r gini-ejemplos, results='asis'}
+# enseño algunas filas con valores outlier (si los hay)
+if (length(out_gini) > 0) {
+  muestra_gini <- datos |>
+    dplyr::filter(.data[[gini_var]] %in% head(out_gini, 10)) |>
+    dplyr::select(Country, CountryCode, Year, Region, !!gini_var)
+
+  knitr::kable(muestra_gini, caption = "GINI — ejemplos de outliers (muestra)") |>
+    kableExtra::kable_styling(full_width = FALSE)
+} else {
+  cat("No veo outliers en GINI según boxplot.stats().\n")
+}
+```
+
+```{r gini-tratamiento}
+# si hubiera cosas como '-1' o '999', los paso a NA
+datos <- datos |>
+  dplyr::mutate(!!gini_var := dplyr::na_if(.data[[gini_var]], -1)) |>
+  dplyr::mutate(!!gini_var := dplyr::na_if(.data[[gini_var]], 999))
+
+# creo un z-score auxiliar por si ayuda a explorar luego
+datos <- datos |>
+  dplyr::mutate(GINI_z = as.numeric(scale(.data[[gini_var]])))
+
+summary(datos$GINI_z)
+```
+
+```{r co2-densidad}
+# 3.2 Emisiones de CO2 — densidad
+ggplot(datos, aes(x = .data[[co2_var]])) +
+  geom_density(na.rm = TRUE) +
+  labs(title = "Emisiones CO2 – densidad", x = "MtCO2", y = "Densidad")
+```
+
+```{r co2-outliers}
+# outliers por IQR 
+co2_ok  <- datos[[co2_var]]
+co2_ok  <- co2_ok[!is.na(co2_ok)]
+bp_co2  <- boxplot.stats(co2_ok)
+out_co2 <- bp_co2$out
+
+c(
+  n_total     = length(co2_ok),
+  n_outliers  = length(out_co2),
+  min_outlier = ifelse(length(out_co2) > 0, min(out_co2), NA),
+  max_outlier = ifelse(length(out_co2) > 0, max(out_co2), NA)
+)
+```
+
+```{r co2-boxplot-year}
+# boxplot de CO2 por año para ver si cambia la dispersión con el tiempo
+ggplot(datos, aes(x = factor(Year), y = .data[[co2_var]])) +
+  geom_boxplot(na.rm = TRUE, outlier.alpha = 0.5) +
+  labs(title = "Emisiones CO2 – boxplot por año", x = "Año", y = "MtCO2")
+```
+
+```{r co2-nota-transformacion}
+# NOTA: CO2 tiene mucha cola derecha; para modelar aquí no la transformo porque quiero ver países "top" en escala natural (MtCO2). Como apoyo, dejo un z-score auxiliar:
+datos <- datos |>
+  dplyr::mutate(CO2_z = as.numeric(scale(.data[[co2_var]])))
+summary(datos$CO2_z)
+```
+
+```{r co2-top2018, results='asis'}
+# top 10 emisores en 2018
+top2018 <- datos |>
+  dplyr::filter(Year == 2018) |>
+  dplyr::select(Country, CountryCode, Region, Year, Emissions = !!co2_var) |>
+  dplyr::arrange(dplyr::desc(Emissions)) |>
+  dplyr::slice_head(n = 10)
+
+knitr::kable(top2018, caption = "Top 10 emisores de CO₂ en 2018") |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+```{r co2-tratamiento}
+# paso centinelas de CO2 a NA si los hubiera
+datos <- datos |>
+  dplyr::mutate(!!co2_var := dplyr::na_if(.data[[co2_var]], -1)) |>
+  dplyr::mutate(!!co2_var := dplyr::na_if(.data[[co2_var]], 999))
+```
+
+# 4. Correlaciones
+
+```{r fase4-prep-2018}
+# trabajo con 2018 (es el último año disponible en este fichero)
+datos_2018 <- datos |> dplyr::filter(Year == 2018)
+
+c(
+  filas_2018 = nrow(datos_2018),
+  paises_2018_unicos = length(unique(datos_2018$CountryCode))
+)
+```
+
+```{r fase4-seleccion-vars}
+# variables ODS para la matriz
+var_ods <- c(
+  "Proportion.of.population.below.international.poverty.line.......SI_POV_DAY1",  
+  "Prevalence.of.undernourishment.......SN_ITK_DEFC",                             
+  "Primary.completion.rate..total....of.relevant.age.group....SE.PRM.CMPT.ZS",    
+  "Gini.index..World.Bank.estimate....SI.POV.GINI",                                
+  "GDP..current.US.....NY.GDP.MKTP.CD"                                             
+)
+
+# me quedo solo con las que existen
+var_ods <- var_ods[var_ods %in% names(datos_2018)]
+var_ods
+```
+
+```{r fase4-cor-matriz, results='asis'}
+# matriz de correlación de Pearson en 2018 (quito filas con NA)
+if (length(var_ods) >= 2) {
+  dt_cor <- datos_2018 |>
+    dplyr::select(dplyr::all_of(var_ods)) |>
+    tidyr::drop_na()
+
+  if (nrow(dt_cor) > 2) {
+    M <- cor(dt_cor, use = "complete.obs", method = "pearson")
+    knitr::kable(round(M, 3),
+                 caption = "Matriz de correlación (2018) — ODS1, ODS2, ODS4, ODS10 y GDP") |>
+      kableExtra::kable_styling(full_width = FALSE)
+  } else {
+    cat("No hay suficientes filas completas en 2018 para la matriz.\n")
+  }
+} else {
+  cat("No hay suficientes variables para construir la matriz.\n")
+}
+```
+
+```{r fase4-lifeexp-top, results='asis'}
+# ODS3: miro qué variables numéricas se relacionan más con Life expectancy (2018)
+life_var <- "Life.expectancy.at.birth..total..years....SP.DYN.LE00.IN"
+
+if (life_var %in% names(datos_2018)) {
+  num_cols <- names(datos_2018)[sapply(datos_2018, is.numeric)]
+  num_cols <- unique(c(life_var, num_cols))
+
+  base_num <- datos_2018 |>
+    dplyr::select(dplyr::all_of(num_cols)) |>
+    dplyr::filter(!is.na(.data[[life_var]]))
+
+  get_cor <- function(v) {
+    x <- base_num[[life_var]]; y <- base_num[[v]]
+    ok <- !is.na(x) & !is.na(y)
+    if (sum(ok) >= 3) cor(x[ok], y[ok], method = "pearson") else NA_real_
+  }
+
+  cors <- sapply(setdiff(num_cols, life_var), get_cor)
+  res  <- data.frame(
+    variable = names(cors),
+    cor_con_lifeexp = as.numeric(cors),
+    stringsAsFactors = FALSE
+  ) |>
+    dplyr::arrange(dplyr::desc(abs(cor_con_lifeexp))) |>
+    dplyr::slice_head(n = 12)
+
+  knitr::kable(res, digits = 3,
+               caption = "Variables más correlacionadas con Life expectancy (2018)") |>
+    kableExtra::kable_styling(full_width = FALSE)
+} else {
+  cat("No encuentro la columna de esperanza de vida en el dataset.\n")
+}
+```
+
+```{r fase4-notas}
+# notas:
+# - Uso Pearson y mismo año (2018) para ser consistente.
+# - Quito filas con NA para que no distorsione.
+# - Para ODS3, resumo con un TOP por cor para ver rápido qué destaca.
+# - Nota: En la matriz (4.1) incluyo ODS1, ODS2, ODS4 (solo SE.PRM.CMPT.ZS), ODS10 y GDP.
+#   ODS3 (Salud) lo analizo en 4.2 con Life expectancy (SP.DYN.LE00.IN), según el enunciado.
+```
+
+# 5. Imputación de valores perdidos
+
+```{r fase5-def-vars}
+# variable objetivo a imputar (ODS3)
+life_var <- "Life.expectancy.at.birth..total..years....SP.DYN.LE00.IN"
+life_var %in% names(datos)
+```
+
+```{r fase5-na-por-anio, results='asis'}
+# miro cuántos NA hay por año en Life expectancy
+na_por_anio <- datos |>
+  dplyr::group_by(Year) |>
+  dplyr::summarise(
+    n = dplyr::n(),
+    na_life = sum(is.na(.data[[life_var]])),
+    .groups = "drop"
+  )
+
+knitr::kable(na_por_anio, caption = "NA en Life expectancy por año") |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+```{r fase5-imput-2000}
+# 5.1 si falta 2000 y existe 2001 para ese país, copio 2001 en 2000 
+na_antes <- sum(is.na(datos[[life_var]]))
+
+datos <- datos |>
+  dplyr::arrange(CountryCode, Year) |>
+  dplyr::group_by(CountryCode) |>
+  dplyr::mutate(
+    life_imp_2000 = dplyr::case_when(
+      Year == 2000 & is.na(.data[[life_var]]) ~ dplyr::first(.data[[life_var]][Year == 2001]),
+      TRUE ~ NA_real_
+    ),
+    "{life_var}" := dplyr::coalesce(.data[[life_var]], life_imp_2000)
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::select(-life_imp_2000)
+
+c(
+  NA_antes = na_antes,
+  NA_despues = sum(is.na(datos[[life_var]])),
+  imputados_2000 = na_antes - sum(is.na(datos[[life_var]]))
+)
+```
+
+```{r fase5-top5-correlativas, results='asis'}
+# 5.2 variables numéricas más correlacionadas con Life expectancy (para kNN)
+id_cols <- c("Country","CountryCode","Region","Income","Regime","Year")
+num_cols <- setdiff(names(datos)[sapply(datos, is.numeric)], c(life_var, "Year"))
+
+cor_with_life <- function(v) {
+  x <- datos[[life_var]]; y <- datos[[v]]
+  ok <- !is.na(x) & !is.na(y)
+  if (sum(ok) >= 3) cor(x[ok], y[ok], method = "pearson") else NA_real_
+}
+
+cors <- sapply(num_cols, cor_with_life)
+ord  <- names(sort(abs(cors), decreasing = TRUE))
+top5 <- head(ord, 5)
+
+tabla_top5 <- data.frame(
+  variable = top5,
+  correlacion = round(cors[top5], 3),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(tabla_top5, caption = "Top 5 variables más correlacionadas con Life expectancy") |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+```{r fase5-knn, message=FALSE, warning=FALSE}
+# 5.3 imputación kNN (uso k=5 por defecto de la función VIM::kNN)
+library(VIM)
+
+vars_modelo <- unique(c(id_cols[id_cols %in% names(datos)], life_var, top5))
+base_knn <- datos |> dplyr::select(dplyr::all_of(vars_modelo))
+
+set.seed(123)  # para que salga igual si se repite
+imp_knn <- VIM::kNN(
+  base_knn,
+  variable = life_var,
+  k = 5,
+  imp_var = TRUE
+)
+
+c(
+  NA_antes_kNN   = sum(is.na(base_knn[[life_var]])),
+  NA_despues_kNN = sum(is.na(imp_knn[[life_var]]))
+)
+```
+
+```{r fase5-merge-y-ejemplo, results='asis'}
+# 5.4 vuelco la imputación al dataset principal y muestro ejemplos
+flag_col <- paste0(life_var, "_imp")
+
+datos <- datos |>
+  dplyr::left_join(
+    imp_knn |> dplyr::select(CountryCode, Year, !!life_var, !!flag_col),
+    by = c("CountryCode", "Year"),
+    suffix = c("", "_imputed")
+  ) |>
+  dplyr::mutate("{life_var}" := dplyr::coalesce(.data[[paste0(life_var, "_imputed")]], .data[[life_var]])) |>
+  dplyr::select(-dplyr::all_of(paste0(life_var, "_imputed")))
+
+ejemplo_imp <- datos |>
+  dplyr::filter(.data[[flag_col]] == TRUE) |>
+  dplyr::select(Country, CountryCode, Year, Region, !!life_var) |>
+  dplyr::slice_head(n = 10)
+
+if (nrow(ejemplo_imp) > 0) {
+  knitr::kable(ejemplo_imp, caption = "Ejemplos de filas imputadas (Life expectancy)") |>
+    kableExtra::kable_styling(full_width = FALSE)
+} else {
+  cat("No veo filas imputadas por kNN.\n")
+}
+```
+
+# 6. Tabla resumen
+
+```{r fase6-def-vars}
+# variables exactas que voy a resumir por región
+var_pobreza <- "Proportion.of.population.below.international.poverty.line.......SI_POV_DAY1"
+var_gini    <- "Gini.index..World.Bank.estimate....SI.POV.GINI"
+var_life    <- "Life.expectancy.at.birth..total..years....SP.DYN.LE00.IN"
+
+c(
+  pobreza_existe = var_pobreza %in% names(datos),
+  gini_existe    = var_gini    %in% names(datos),
+  life_existe    = var_life    %in% names(datos),
+  region_existe  = "Region"    %in% names(datos)
+)
+```
+
+```{r fase6-ultimo-anio}
+# trabajo en el último año disponible para no mezclar periodos
+ultimo_anio <- max(datos$Year, na.rm = TRUE)
+datos_last  <- datos |> dplyr::filter(Year == ultimo_anio)
+
+c(ultimo_anio = ultimo_anio, filas = nrow(datos_last))
+```
+
+```{r fase6-prep}
+# dejo preparado un dataset mínimo con lo que necesito
+base_last <- datos_last |>
+  dplyr::select(
+    Region,
+    Pobreza = !!var_pobreza,
+    GINI    = !!var_gini,
+    LifeExp = !!var_life
+  ) |>
+  dplyr::mutate(Region = trimws(Region))
+```
+
+```{r fase6-tendencia, results='asis'}
+# 6.1 medidas de tendencia por región
+tabla_tend <- base_last |>
+  dplyr::group_by(Region) |>
+  dplyr::summarise(
+    dplyr::across(
+      .cols = c(Pobreza, GINI, LifeExp),
+      .fns  = list(mean = ~mean(.x, na.rm = TRUE),
+                   median = ~median(.x, na.rm = TRUE)),
+      .names = "{.col}_{.fn}"
+    ),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(dplyr::across(where(is.numeric), ~round(.x, 2)))
+
+knitr::kable(
+  tabla_tend,
+  caption = paste0("Medidas de tendencia por región (año ", ultimo_anio, ")")
+) |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+```{r fase6-dispersion, results='asis'}
+# 6.2 medidas de dispersión por región
+tabla_disp <- base_last |>
+  dplyr::group_by(Region) |>
+  dplyr::summarise(
+    dplyr::across(
+      .cols = c(Pobreza, GINI, LifeExp),
+      .fns  = list(sd = ~sd(.x, na.rm = TRUE),
+                   mad = ~mad(.x, na.rm = TRUE)),
+      .names = "{.col}_{.fn}"
+    ),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(dplyr::across(where(is.numeric), ~round(.x, 2)))
+
+knitr::kable(
+  tabla_disp,
+  caption = paste0("Medidas de dispersión por región (año ", ultimo_anio, ")")
+) |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+```{r fase6-notas}
+# notas rápidas:
+# - Siguiendo el enunciado: media/mediana y sd/MAD.
+# - Uso el último año disponible.
+# - Redondeo a 2 decimales para que la tabla se lea mejor.
+```
+
+
+### 7. Export del dataset limpio
+```{r fase7-export, results='hide', message=FALSE}
+# creo el dataset "limpio" final
+cols_quitar <- c("GINI_z", "CO2_z")
+cols_export <- setdiff(names(datos), cols_quitar)
+
+datos_clean <- datos |> dplyr::select(dplyr::all_of(cols_export))
+
+readr::write_csv(datos_clean, "Suesta_fichero_clean.csv")
+```
+
+### 8. Conclusiones
+
+```{r fase8-conclusiones, echo=FALSE}
+cat(
+  "- He estandarizado identificadores (Country, CountryCode, Year, Region, Income, Regime) y tipos.\n",
+  "- He detectado algun outlier con IQR en GINI y una fuerte asimetría en CO2 (cola derecha).\n",
+  "- Para 2018, la matriz de correlaciones cubre ODS1/2/4/10 y GDP; ODS3 se ha analizado con Life expectancy.\n",
+  "- He imputado Life expectancy: primero 2000←2001 cuando faltaba, y después kNN (k=5) para el resto.\n",
+  "- Tablas por región del último año con media/mediana y sd/MAD.\n"
+)
+```
